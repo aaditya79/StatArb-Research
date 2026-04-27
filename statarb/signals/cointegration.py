@@ -33,8 +33,20 @@ def test_cointegration(
     pvalue_threshold: float = 0.05,
     lookback: int = 252,
 ) -> pd.DataFrame:
-    # Use per-pair dropna so tickers with partial history don't exclude all others
-    log_px = np.log(prices.iloc[-lookback:])
+    """
+    Pairwise Engle-Granger cointegration test.
+
+    Tests every (t1, t2) pair on the supplied `prices` frame. The caller
+    is responsible for slicing `prices` to the period that should be used
+    for the test (e.g., the formation window). `lookback` is retained
+    as a parameter only for backwards compatibility — when `prices` is
+    longer than `lookback` the trailing slice is taken; when `prices` is
+    already at or below `lookback` rows it is used as-is.
+    """
+    if len(prices) > lookback:
+        log_px = np.log(prices.iloc[-lookback:])
+    else:
+        log_px = np.log(prices)
     tickers = log_px.columns.tolist()
     rows = []
     for i, t1 in enumerate(tickers):

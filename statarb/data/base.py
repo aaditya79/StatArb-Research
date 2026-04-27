@@ -59,3 +59,17 @@ class DataSource(ABC):
         """
         prices = self.fetch_prices(tickers, start, end)
         return np.log(prices / prices.shift(1)).dropna(how="all")
+
+    def fetch_sector_mapping(self, tickers: list[str]) -> dict[str, str]:
+        """
+        Map each ticker to its sector ETF symbol.
+
+        Default: returns empty dict. Subclasses override with their
+        provider-specific sector lookup (yfinance `.info` metadata,
+        CRSP SIC codes, etc.).
+
+        Callers in universe.py layer a TICKER_TO_ETF_OVERRIDES dict
+        and a fallback "XLY" on top of whatever this returns, so a
+        partial or empty result from the source is fine.
+        """
+        return {}

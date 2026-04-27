@@ -1,0 +1,80 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  @apply bg-canvas text-navy-950 font-sans antialiased;
+  background-image:
+    radial-gradient(1200px 600px at 90% -10%, rgba(30, 58, 115, 0.06), transparent 60%),
+    radial-gradient(900px 500px at -10% 110%, rgba(30, 58, 115, 0.04), transparent 60%);
+  background-attachment: fixed;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(30,58,115,0.18); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(30,58,115,0.32); }
+
+input[type="number"], input[type="text"], input[type="date"], select, textarea {
+  @apply bg-white text-navy-950 border border-slate-200 rounded-lg px-3 py-2 outline-none;
+  @apply focus:border-navy-500 focus:ring-4 focus:ring-navy-500/15 transition;
+}
+input[type="checkbox"] { accent-color: #1e3a73; }
+input[type="range"] { accent-color: #1e3a73; }
+
+label.field {
+  @apply block text-[11px] font-semibold tracking-wider uppercase text-slate-500 mb-1.5;
+}
+
+button.btn-primary {
+  @apply inline-flex items-center justify-center gap-2 px-5 py-3 rounded-xl font-semibold;
+  @apply bg-navy-800 text-white shadow-card;
+  @apply hover:bg-navy-700 active:bg-navy-900 transition;
+  @apply disabled:opacity-50 disabled:cursor-not-allowed;
+}
+button.btn-secondary {
+  @apply inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg font-medium text-sm;
+  @apply bg-white border border-slate-200 text-navy-800 hover:bg-navy-50 transition;
+}
+button.btn-ghost {
+  @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium;
+  @apply bg-slate-100 text-slate-700 hover:bg-slate-200 transition;
+}
+
+.card {
+  @apply bg-paper border border-slate-200 rounded-2xl shadow-card;
+}
+.card-pad { @apply p-6; }
+.divider { @apply h-px bg-slate-200 my-5; }
+
+.kbd {
+  @apply font-mono text-[11px] px-1.5 py-0.5 rounded border border-slate-200 bg-slate-50 text-slate-600;
+}
+
+/* Pill tabs */
+.tabs {
+  @apply inline-flex p-1 bg-slate-100 rounded-xl;
+}
+.tab {
+  @apply px-4 py-2 text-sm font-medium text-slate-600 rounded-lg transition;
+}
+.tab-active {
+  @apply bg-white text-navy-900 shadow-card;
+}
+
+/* Model picker cards */
+.modelcard {
+  @apply text-left p-4 rounded-xl border border-slate-200 bg-white transition cursor-pointer;
+  @apply hover:border-navy-400 hover:shadow-card;
+}
+.modelcard-active {
+  @apply border-navy-700 ring-4 ring-navy-700/10 bg-navy-50/40;
+}

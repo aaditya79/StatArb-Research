@@ -4,42 +4,71 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from config import SECTOR_TO_ETF_MAP
+from config import TICKER_TO_ETF_OVERRIDES
 
 if TYPE_CHECKING:
     from .base import DataSource
 
 logger = logging.getLogger(__name__)
 
+# Final fallback when neither an override nor the data source resolves
+# a ticker. XLY (broad consumer discretionary) is preferred over XLK
+# because unknown mid/small-caps historically skew consumer/industrial.
+_DEFAULT_FALLBACK_ETF = "XLY"
 
-def get_sector_mapping(tickers: list[str]) -> dict[str, str]:
+
+def get_sector_mapping(
+    tickers: list[str],
+    data_source: "DataSource | None" = None,
+) -> dict[str, str]:
     """
-    Map each ticker to its sector ETF.
+    Map each ticker to its sector ETF. Three-stage lookup:
 
-    Uses yfinance .info metadata to look up the sector, then maps
-    to the corresponding ETF via SECTOR_TO_ETF_MAP. Falls back to
-    XLK if sector is unknown.
+        1. TICKER_TO_ETF_OVERRIDES (config.py) — hardcoded fixes for
+           delisted names and known-ambiguous symbol collisions.
+        2. data_source.fetch_sector_mapping(tickers) — yfinance .info
+           or CRSP SIC-code lookup, depending on the selected source.
+        3. _DEFAULT_FALLBACK_ETF — for any ticker still unresolved.
+
+    This replaces the old "yfinance-or-XLK" fallback which misrouted
+    every delisted ticker to the tech ETF.
 
     Args:
         tickers: List of ticker symbols.
+        data_source: Active DataSource (YFinanceSource or CRSPSource).
+            If None, only overrides + fallback are used.
 
     Returns:
         Dict mapping ticker -> sector ETF symbol.
     """
-    import yfinance as yf
+    mapping: dict[str, str] = {}
+    remaining: list[str] = []
 
-    mapping = {}
+    # Stage 1: hard-coded overrides (delisted names, known collisions).
     for ticker in tickers:
+        if ticker in TICKER_TO_ETF_OVERRIDES:
+            mapping[ticker] = TICKER_TO_ETF_OVERRIDES[ticker]
+        else:
+            remaining.append(ticker)
+
+    # Stage 2: delegate to the data source (yfinance .info or CRSP SIC).
+    if remaining and data_source is not None:
         try:
-            info = yf.Ticker(ticker).info
-            sector = info.get("sector", "")
-            etf = SECTOR_TO_ETF_MAP.get(sector, "XLK")
-            mapping[ticker] = etf
-        except Exception:
-            logger.warning(
-                f"Could not fetch sector for {ticker}, defaulting to XLK"
-            )
-            mapping[ticker] = "XLK"
+            source_map = data_source.fetch_sector_mapping(remaining)
+            mapping.update(source_map)
+        except Exception as e:
+            logger.warning(f"data_source.fetch_sector_mapping failed: {e}")
+
+    # Stage 3: final fallback for anything still unresolved.
+    unresolved = [t for t in tickers if t not in mapping]
+    if unresolved:
+        logger.info(
+            f"{len(unresolved)} tickers had no sector resolution; "
+            f"defaulting to {_DEFAULT_FALLBACK_ETF}. Sample: {unresolved[:10]}"
+        )
+        for t in unresolved:
+            mapping[t] = _DEFAULT_FALLBACK_ETF
+
     return mapping
 
 

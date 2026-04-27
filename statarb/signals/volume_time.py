@@ -29,20 +29,27 @@ def compute_volume_adjusted_returns(
     Returns:
         DataFrame of volume-adjusted returns, same shape as input.
     """
-    # Trailing average volume
+    # Trailing average volume (uses the current and prior `trailing_window-1`
+    # days — paper Section 6, Eq. 20).
     avg_volume = volume.rolling(window=trailing_window, min_periods=1).mean()
 
-    # Current period volume (avoid division by zero)
-    current_volume = volume.replace(0, np.nan)
+    # Current-day volume. A 0 print is treated as missing (rather than
+    # divide-by-zero) and a NaN is genuinely missing data. Both are
+    # imputed with the trailing rolling average shifted by one day — i.e.,
+    # only past data is used to fill, so there's no lookahead. When the
+    # imputation lands on NaN itself (very start of the series), fall
+    # back to the per-day cross-sectional non-imputation route via NaN.
+    raw = volume.replace(0, np.nan)
+    trailing_lagged = avg_volume.shift(1)
+    current_volume = raw.fillna(trailing_lagged)
 
-    # Volume ratio: avg_V / V_t
+    # Volume ratio: avg_V / V_t. With the trailing fill, a missing-print
+    # day yields ratio ~= 1 (no adjustment), which is the right default.
     volume_ratio = avg_volume / current_volume
-    volume_ratio = volume_ratio.clip(upper=10.0)  # cap extreme ratios
+    volume_ratio = volume_ratio.clip(upper=10.0)
 
-    # Adjusted returns
     adjusted = returns * volume_ratio
-
-    # Fill NaN with original returns (if volume data missing)
+    # Final safety net: any day where neither raw nor trailing fill was
+    # available (early sample) keeps the unadjusted return.
     adjusted = adjusted.fillna(returns)
-
     return adjusted

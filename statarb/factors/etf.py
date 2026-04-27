@@ -48,6 +48,12 @@ class ETFFactorModel(FactorModel):
         if etf_returns is None:
             raise ValueError("etf_returns is required for ETFFactorModel")
 
+        # Align ETF returns to the stock-returns index. Without this the two
+        # frames can have different lengths (different fetch cutoffs, missing
+        # ETF bars on specific dates) and positional indexing into .values
+        # goes out of bounds.
+        etf_returns = etf_returns.reindex(returns.index)
+
         tickers = returns.columns.tolist()
         dates = returns.index
         T = len(dates)
@@ -63,31 +69,59 @@ class ETFFactorModel(FactorModel):
                 betas_last[ticker] = 0.0
                 continue
 
-            stock_ret = returns[ticker].values
-            etf_ret = etf_returns[etf_ticker].values
+            stock_ret = returns[ticker].values.astype(float)
+            etf_ret = etf_returns[etf_ticker].values.astype(float)
 
-            # Rolling OLS: R_stock = beta * R_etf + residual (no intercept)
-            for t in range(self.rolling_window, T):
-                window_stock = stock_ret[t - self.rolling_window : t]
-                window_etf = etf_ret[t - self.rolling_window : t]
+            # Rolling OLS (no intercept): R_stock = beta * R_etf + residual.
+            # Vectorised: compute rolling sum(x^2) and rolling sum(x*y), then
+            # beta_t = Sxy_t / Sxx_t over the trailing `rolling_window` bars.
+            valid = np.isfinite(stock_ret) & np.isfinite(etf_ret)
+            x = np.where(valid, etf_ret, 0.0)
+            y = np.where(valid, stock_ret, 0.0)
+            xy = x * y
+            xx = x * x
+            cnt = valid.astype(float)
 
-                mask = np.isfinite(window_stock) & np.isfinite(window_etf)
-                if mask.sum() < 30:
-                    continue
+            # Cumulative sums -> rolling sums via difference.
+            c_xy = np.concatenate(([0.0], np.cumsum(xy)))
+            c_xx = np.concatenate(([0.0], np.cumsum(xx)))
+            c_cnt = np.concatenate(([0.0], np.cumsum(cnt)))
 
-                y = window_stock[mask]
-                x = window_etf[mask]
-                x_sq_sum = np.dot(x, x)
-                if x_sq_sum < 1e-12:
-                    continue
+            W = self.rolling_window
+            if T > W:
+                roll_xy = c_xy[W:T + 1] - c_xy[: T + 1 - W]   # (T+1-W,)
+                roll_xx = c_xx[W:T + 1] - c_xx[: T + 1 - W]
+                roll_cnt = c_cnt[W:T + 1] - c_cnt[: T + 1 - W]
+                # These cover t = W..T (inclusive), matching original loop
+                # which set residuals at t = W, W+1, ..., T-1.
+                # Slice the first (T - W) entries to align with those t's.
+                roll_xy = roll_xy[: T - W]
+                roll_xx = roll_xx[: T - W]
+                roll_cnt = roll_cnt[: T - W]
 
-                beta = np.dot(x, y) / x_sq_sum
-                residuals.iloc[t, residuals.columns.get_loc(ticker)] = stock_ret[t] - beta * etf_ret[t]
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    betas = np.where(
+                        (roll_xx > 1e-12) & (roll_cnt >= 30),
+                        roll_xy / np.where(roll_xx > 1e-12, roll_xx, 1.0),
+                        np.nan,
+                    )
+                # Apply to days W..T-1
+                stock_at_t = stock_ret[W:T]
+                etf_at_t = etf_ret[W:T]
+                day_resid = np.where(
+                    np.isfinite(betas) & np.isfinite(stock_at_t) & np.isfinite(etf_at_t),
+                    stock_at_t - betas * etf_at_t,
+                    np.nan,
+                )
+                residuals.iloc[W:T, residuals.columns.get_loc(ticker)] = day_resid
 
-            # Store last beta
-            betas_last[ticker] = beta if "beta" in dir() else 0.0
+                # Last valid beta for the betas_last dict.
+                finite_betas = betas[np.isfinite(betas)]
+                betas_last[ticker] = float(finite_betas[-1]) if len(finite_betas) else 0.0
+            else:
+                betas_last[ticker] = 0.0
 
-            # R-squared on last window
+            # R-squared on the final rolling window (diagnostic).
             if T >= self.rolling_window:
                 last_y = stock_ret[-self.rolling_window:]
                 last_x = etf_ret[-self.rolling_window:]

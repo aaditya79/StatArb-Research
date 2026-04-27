@@ -82,6 +82,11 @@ class CombinedFactorModel(FactorModel):
                 "etf_returns and spy_returns required for CombinedFactorModel"
             )
 
+        # Align ETF and SPY returns to the stock-returns index so every
+        # .values slice stays the same length.
+        etf_returns = etf_returns.reindex(returns.index)
+        spy_returns = spy_returns.reindex(returns.index)
+
         tickers = returns.columns.tolist()
         dates = returns.index
         T = len(dates)

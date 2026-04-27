@@ -29,6 +29,7 @@ class OUParams:
     half_life: float    # mean-reversion half-life in trading days
     a: float            # AR(1) intercept
     b: float            # AR(1) slope
+    factor_beta: float = 0.0  # Slope on first factor (used for sector-ETF hedge).
 
 
 def fit_ar1(series: np.ndarray) -> tuple[float, float, float] | None:
@@ -112,6 +113,69 @@ def ar1_to_ou(
         a=a,
         b=b,
     )
+
+
+def estimate_ou_params_window(
+    stock_returns: np.ndarray,
+    factor_returns: np.ndarray,
+    dt: float = 1.0 / 252.0,
+) -> OUParams | None:
+    """
+    Paper Appendix A estimator.
+
+    Fits a fresh OLS with intercept on the same window used for the
+    OU estimation:
+        R_stock_n = beta_0 + beta * F_n + epsilon_n,  n = 1..window
+
+    Builds X_k = cumsum(epsilon). By OLS identity, X_{window} = 0 --
+    this is the condition that makes Appendix A's shortcut
+        s = -m / sigma_eq
+    exact (s-score computed in compute_sscores).
+
+    Handles single-factor (ETF) or multi-factor (PCA) F. For single-factor
+    the slope is stored in params.factor_beta for hedge sizing.
+
+    Args:
+        stock_returns: 1-D array of stock log returns, length = window.
+        factor_returns: 1-D (window,) or 2-D (window, k) factor returns.
+        dt: Time step in years.
+
+    Returns:
+        OUParams or None if estimation fails.
+    """
+    y = np.asarray(stock_returns, dtype=float)
+    F = np.asarray(factor_returns, dtype=float)
+    if F.ndim == 1:
+        F = F.reshape(-1, 1)
+    if len(y) != len(F):
+        return None
+
+    mask = np.isfinite(y) & np.all(np.isfinite(F), axis=1)
+    if mask.sum() < 30:
+        return None
+    y_m = y[mask]
+    F_m = F[mask]
+    n = len(y_m)
+
+    design = np.hstack([np.ones((n, 1)), F_m])
+    try:
+        coef, *_ = np.linalg.lstsq(design, y_m, rcond=None)
+    except np.linalg.LinAlgError:
+        return None
+
+    eps = y_m - design @ coef
+    X = np.cumsum(eps)
+
+    result = fit_ar1(X)
+    if result is None:
+        return None
+    a, b, var_eps = result
+    params = ar1_to_ou(a, b, var_eps, dt)
+    if params is None:
+        return None
+    if len(coef) >= 2:
+        params.factor_beta = float(coef[1])
+    return params
 
 
 def estimate_ou_params(
