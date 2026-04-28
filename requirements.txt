@@ -9,3 +9,4 @@ scipy>=1.11
 python-dotenv>=1.0
 wrds>=3.1
 pytest>=7.4
+hmmlearn

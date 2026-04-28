@@ -20,81 +20,12 @@ Orchestrates the full paper-faithful pipeline:
       8. Mark to market.
 """
 from dataclasses import dataclass, field
-import hashlib
-import json
 import logging
-import pickle
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from config import Config
-
-_CACHE_DIR = Path(__file__).parent.parent.parent / ".cache"
-
-
-def _backtest_cache_key(config: "Config") -> str:
-    payload = {
-        "tickers": sorted(config.tickers),
-        "start": config.start_date,
-        "end": config.end_date,
-        "data_source": config.data_source,
-        "trading_mode": config.trading_mode,
-        "factor": {
-            "model_type": config.factor.model_type,
-            "pca_lookback": config.factor.pca_lookback,
-            "pca_n_components": config.factor.pca_n_components,
-            "explained_variance_threshold": config.factor.explained_variance_threshold,
-            "use_ledoit_wolf": config.factor.use_ledoit_wolf,
-            "beta_rolling_window": config.factor.beta_rolling_window,
-        },
-        "ou": {
-            "estimation_window": config.ou.estimation_window,
-            "kappa_min": config.ou.kappa_min,
-            "mean_center": config.ou.mean_center,
-        },
-        "signal": {
-            "s_bo": config.signal.s_bo,
-            "s_so": config.signal.s_so,
-            "s_sc": config.signal.s_sc,
-            "s_bc": config.signal.s_bc,
-            "s_limit": config.signal.s_limit,
-        },
-        "volume": {
-            "enabled": config.volume.enabled,
-            "trailing_window": config.volume.trailing_window,
-        },
-        "backtest": {
-            "initial_equity": config.backtest.initial_equity,
-            "leverage_long": config.backtest.leverage_long,
-            "leverage_short": config.backtest.leverage_short,
-            "tc_bps": config.backtest.tc_bps,
-            "hedge_instrument": config.backtest.hedge_instrument,
-            "risk_free_rate": config.backtest.risk_free_rate,
-            "dt": config.backtest.dt,
-        },
-    }
-    digest = hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()
-    return digest
-
-
-def _load_backtest_cache(digest: str) -> "BacktestResult | None":
-    path = _CACHE_DIR / f"backtest_{digest}.pkl"
-    if path.exists():
-        try:
-            with open(path, "rb") as f:
-                return pickle.load(f)
-        except Exception:
-            path.unlink(missing_ok=True)
-    return None
-
-
-def _save_backtest_cache(digest: str, result: "BacktestResult") -> None:
-    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    path = _CACHE_DIR / f"backtest_{digest}.pkl"
-    with open(path, "wb") as f:
-        pickle.dump(result, f)
 from statarb.factors.base import FactorResult
 from statarb.factors.pca import compute_pca_eigenportfolio_returns
 from statarb.signals.ou_estimator import (
@@ -105,6 +36,8 @@ from statarb.signals.ou_estimator import (
 from statarb.signals.sscore import compute_sscores
 from statarb.signals.filters import filter_eligible
 from statarb.signals.volume_time import compute_volume_adjusted_returns
+from statarb.extensions.hmm_regime import HMMRegimeDetector
+from statarb.extensions.vol_targeting import VolTargetedSizer
 from .portfolio import PortfolioManager
 from .metrics import compute_metrics, PerformanceMetrics
 
@@ -121,6 +54,47 @@ class BacktestResult:
     metrics: PerformanceMetrics
     factor_result: FactorResult
     daily_ou_params: dict = field(default_factory=dict)
+    # P(favorable regime | data up to t) per trading date when HMM enabled.
+    regime_proba: pd.Series | None = None
+
+
+def _setup_hmm(
+    config: Config, residuals: pd.DataFrame
+) -> tuple[np.ndarray | None, HMMRegimeDetector | None]:
+    """
+    Fit the HMM on the training window of `residuals` and return the
+    full causal favorable-regime probability array, aligned to
+    `residuals.index`. Returns (None, None) when disabled or fitting fails.
+    """
+    if not getattr(config, "hmm", None) or not config.hmm.enabled:
+        return None, None
+    if residuals is None or residuals.empty:
+        logger.warning("HMM enabled but residuals frame is empty; disabling.")
+        return None, None
+
+    detector = HMMRegimeDetector(
+        n_states=config.hmm.n_states,
+        training_window=config.hmm.training_window,
+        feature_window=config.hmm.feature_window,
+        favorable_high_vol=getattr(config.hmm, "favorable_high_vol", True),
+    )
+    features = detector.build_features(residuals)
+    try:
+        detector.fit(features)
+    except (ValueError, RuntimeError) as exc:
+        logger.warning("HMM fit failed (%s) — regime gating disabled.", exc)
+        return None, None
+    proba = detector.predict_proba_causal(features)
+    favorable = detector.get_favorable_proba(proba).astype(float)
+    # Mask the in-sample prefix: every index up to (and including) the last
+    # training row was seen by EM. Engine treats NaN as "regime unknown" and
+    # blocks new entries, eliminating the in-sample lookahead.
+    end_idx = int(detector.training_end_idx)
+    if end_idx > 0:
+        favorable[:end_idx] = np.nan
+    print(f"[HMM] training ends at residual index {end_idx} "
+          f"({end_idx} rows in-sample, {len(favorable) - end_idx} OOS)")
+    return favorable, detector
 
 
 def _rolling_beta(
@@ -172,13 +146,6 @@ def run_backtest(
     Returns:
         BacktestResult.
     """
-    cache_digest = _backtest_cache_key(config)
-    cached = _load_backtest_cache(cache_digest)
-    if cached is not None:
-        logger.info(f"[run_backtest] cache hit ({cache_digest[:8]}…); skipping simulation.")
-        print(f"[run_backtest] cache hit ({cache_digest[:8]}…); returning cached result.")
-        return cached
-
     model_type = config.factor.model_type
 
     # ── Canonicalize inputs ──
@@ -313,6 +280,32 @@ def run_backtest(
                 f"will be unreliable. Try pca_n_components in {{1, 2, 3}}."
             )
 
+    # ── HMM regime filter (causal, no lookahead) ──
+    # Features are built from factor_result.residuals — i.e. the
+    # idiosyncratic component the strategy actually trades. Aligned to
+    # the prices index so positional lookup matches the main loop.
+    hmm_residuals = factor_result.residuals.reindex(prices.index) \
+        if factor_result is not None else None
+    favorable_proba, _hmm = _setup_hmm(config, hmm_residuals)
+    if favorable_proba is not None:
+        print(f"[run_backtest] HMM regime filter ON  "
+              f"(threshold={config.hmm.entry_threshold}, "
+              f"mean P(favorable)={np.nanmean(favorable_proba):.3f})")
+
+    # ── Vol-targeted sizer (replaces equal-notional when enabled) ──
+    vol_sizer = (
+        VolTargetedSizer(
+            floor_multiplier=config.vol_target.floor_multiplier,
+            cap_multiplier=config.vol_target.cap_multiplier,
+        )
+        if getattr(config, "vol_target", None) and config.vol_target.enabled
+        else None
+    )
+    if vol_sizer is not None:
+        print(f"[run_backtest] Vol-target sizing ON  "
+              f"(floor={config.vol_target.floor_multiplier}, "
+              f"cap={config.vol_target.cap_multiplier})")
+
     # ── Portfolio ──
     portfolio = PortfolioManager(
         initial_equity=config.backtest.initial_equity,
@@ -327,6 +320,7 @@ def run_backtest(
     position_records: list[dict] = []
     sscore_records: dict = {}
     daily_ou_params: dict = {}
+    regime_records: dict = {}
 
     # n_target: expected concurrently-open positions. Paper (§5.1) targets
     # ~2% of equity per position → ~100 concurrent positions at 2+2 leverage.
@@ -554,9 +548,41 @@ def run_backtest(
                     "notional": pos.notional,
                 })
 
+        # ── Step 5b: HMM regime gate ──
+        # Default to "in favorable regime" when HMM is off so the existing
+        # entry logic is unchanged; when on, gate new entries on the
+        # causal P(favorable | data up to t). Exits are NEVER gated.
+        in_favorable_regime = True
+        regime_scale = 1.0
+        if favorable_proba is not None:
+            p_fav_raw = favorable_proba[i]
+            if np.isnan(p_fav_raw):
+                # Regime unknown (in-sample HMM training prefix or no data
+                # yet). Block new entries to avoid in-sample lookahead.
+                in_favorable_regime = False
+                regime_scale = 0.0
+            else:
+                p_fav = float(p_fav_raw)
+                regime_records[date] = p_fav
+                if getattr(config.hmm, "soft_gate", False):
+                    floor = float(getattr(config.hmm, "soft_gate_floor", 0.2))
+                    regime_scale = max(floor, min(1.0, p_fav))
+                    in_favorable_regime = True
+                else:
+                    in_favorable_regime = p_fav >= config.hmm.entry_threshold
+
         # ── Step 6: entries ──
         notional_per_pos = portfolio.compute_notional_per_position(n_target)
+        # Vol-targeting: per-ticker scale factors with mean = 1.0 across the
+        # eligible set, so the total deployed notional matches the equal-
+        # notional baseline (no silent leverage inflation).
+        vol_scales = (
+            vol_sizer.compute_scales(eligible_params)
+            if vol_sizer is not None else None
+        )
         for ticker in eligible:
+            if not in_favorable_regime:
+                break
             if ticker in portfolio.positions:
                 continue
             if ticker not in sscores.index:
@@ -573,12 +599,21 @@ def run_backtest(
             if direction is None:
                 continue
 
+            # Per-ticker notional: vol-targeted (budget-preserving) or
+            # equal-notional.
+            if vol_scales is not None:
+                pos_notional = notional_per_pos * vol_scales.get(ticker, 1.0)
+            else:
+                pos_notional = notional_per_pos
+            # Soft regime gate: scale by p_fav (1.0 when HMM off or binary).
+            pos_notional = pos_notional * regime_scale
+
             opened = portfolio.open_position(
                 ticker=ticker,
                 direction=direction,
                 price=price_dict[ticker],
                 date=date_ts,
-                notional=notional_per_pos,
+                notional=pos_notional,
             )
             if opened is None or not hedge_enabled:
                 continue
@@ -611,7 +646,7 @@ def run_backtest(
                 stock_ticker=ticker,
                 hedge_ticker=htk,
                 stock_direction=direction,
-                stock_notional=notional_per_pos,
+                stock_notional=pos_notional,
                 beta=beta,
                 hedge_price=hprice,
                 date=date_ts,
@@ -664,7 +699,12 @@ def run_backtest(
           f"max_dd={metrics.max_drawdown:.2%}, total_costs=${portfolio.total_costs:,.0f}")
     print("=" * 60)
 
-    result = BacktestResult(
+    regime_proba: pd.Series | None = None
+    if regime_records:
+        regime_proba = pd.Series(regime_records, name="p_favorable")
+        regime_proba.index = pd.DatetimeIndex(regime_proba.index)
+
+    return BacktestResult(
         equity_curve=equity_curve,
         trades=trades,
         daily_positions=daily_positions,
@@ -672,7 +712,5 @@ def run_backtest(
         metrics=metrics,
         factor_result=factor_result,
         daily_ou_params=daily_ou_params,
+        regime_proba=regime_proba,
     )
-    _save_backtest_cache(cache_digest, result)
-    logger.info(f"[run_backtest] result cached ({cache_digest[:8]}…).")
-    return result

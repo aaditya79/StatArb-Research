@@ -7,7 +7,7 @@ interface Props {
   busy: boolean;
 }
 
-type AdvTab = "factor" | "ou" | "signal" | "exec";
+type AdvTab = "factor" | "ou" | "signal" | "exec" | "ext";
 
 export default function ConfigPanel({ defaults, onRun, busy }: Props) {
   const [tickersText, setTickersText] = useState(defaults.default_tickers.join(", "));
@@ -34,6 +34,10 @@ export default function ConfigPanel({ defaults, onRun, busy }: Props) {
     leverage_long: 2.0, leverage_short: 2.0,
     tc_bps: 1.0, hedge_instrument: "SPY",
     pairs_pvalue: 0.05, pairs_max: 20, pairs_min_hl: 1.0, pairs_max_hl: 126.0,
+    hmm_enabled: false, hmm_n_states: 2, hmm_training_window: 252,
+    hmm_feature_window: 20, hmm_entry_threshold: 0.5,
+    hmm_favorable_high_vol: true, hmm_soft_gate: true, hmm_soft_gate_floor: 0.2,
+    vol_target_enabled: false, vol_target_floor: 0.2, vol_target_cap: 5.0,
   });
 
   useEffect(() => {
@@ -162,7 +166,7 @@ export default function ConfigPanel({ defaults, onRun, busy }: Props) {
         {advOpen && (
           <div className="mt-4">
             <div className="tabs">
-              {(["factor", "ou", "signal", "exec"] as AdvTab[]).map((t) => (
+              {(["factor", "ou", "signal", "exec", "ext"] as AdvTab[]).map((t) => (
                 <button
                   key={t}
                   onClick={() => setTab(t)}
@@ -264,6 +268,65 @@ export default function ConfigPanel({ defaults, onRun, busy }: Props) {
                     onChange={(v) => update("tc_bps", v)} />
                 </div>
               )}
+
+              {tab === "ext" && (
+                <div className="space-y-5">
+                  {/* HMM regime filter */}
+                  <ExtBlock
+                    title="HMM regime filter"
+                    desc="Fits a 2-state Gaussian HMM on cross-sectional residual vol; gates new entries by P(favorable) computed causally."
+                    enabled={req.hmm_enabled}
+                    onToggle={(v) => update("hmm_enabled", v)}
+                  >
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <NumField label="Hidden states" v={req.hmm_n_states}
+                        step={1} min={2} max={4}
+                        onChange={(v) => update("hmm_n_states", v)} />
+                      <NumField label="Training window" v={req.hmm_training_window}
+                        step={1} min={60} max={1000}
+                        onChange={(v) => update("hmm_training_window", v)} />
+                      <NumField label="Feature window" v={req.hmm_feature_window}
+                        step={1} min={5} max={60}
+                        onChange={(v) => update("hmm_feature_window", v)} />
+                      <NumField label="Entry threshold" v={req.hmm_entry_threshold}
+                        step={0.05} min={0.0} max={1.0}
+                        onChange={(v) => update("hmm_entry_threshold", v)} />
+                      <NumField label="Soft-gate floor" v={req.hmm_soft_gate_floor}
+                        step={0.05} min={0.0} max={1.0}
+                        onChange={(v) => update("hmm_soft_gate_floor", v)} />
+                    </div>
+                    <div className="flex flex-wrap gap-4 mt-3 text-xs text-slate-700">
+                      <label className="flex items-center gap-2">
+                        <input type="checkbox" checked={req.hmm_favorable_high_vol}
+                          onChange={(e) => update("hmm_favorable_high_vol", e.target.checked)} />
+                        Favorable = high cross-sectional residual vol (mean-reversion harvests dispersion)
+                      </label>
+                      <label className="flex items-center gap-2">
+                        <input type="checkbox" checked={req.hmm_soft_gate}
+                          onChange={(e) => update("hmm_soft_gate", e.target.checked)} />
+                        Soft gate (scale notional by P(favorable) instead of binary on/off)
+                      </label>
+                    </div>
+                  </ExtBlock>
+
+                  {/* Vol-targeted sizing */}
+                  <ExtBlock
+                    title="Vol-targeted sizing"
+                    desc="Scales each new position's notional by target_sigma / sigma_eq, so high-vol stocks contribute equal risk rather than equal notional."
+                    enabled={req.vol_target_enabled}
+                    onToggle={(v) => update("vol_target_enabled", v)}
+                  >
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                      <NumField label="Floor multiplier" v={req.vol_target_floor}
+                        step={0.05} min={0.0} max={2.0}
+                        onChange={(v) => update("vol_target_floor", v)} />
+                      <NumField label="Cap multiplier" v={req.vol_target_cap}
+                        step={0.5} min={1.0} max={20.0}
+                        onChange={(v) => update("vol_target_cap", v)} />
+                    </div>
+                  </ExtBlock>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -273,7 +336,13 @@ export default function ConfigPanel({ defaults, onRun, busy }: Props) {
 }
 
 function tabLabel(t: AdvTab) {
-  return { factor: "Factor model", ou: "OU process", signal: "Signal", exec: "Execution" }[t];
+  return {
+    factor: "Factor model",
+    ou: "OU process",
+    signal: "Signal",
+    exec: "Execution",
+    ext: "Extensions",
+  }[t];
 }
 
 function modelBlurb(m: ModelType) {
@@ -359,5 +428,64 @@ function Toggle({ label, v, onChange }: { label: string; v: boolean; onChange: (
 function Spinner() {
   return (
     <span className="inline-block w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+  );
+}
+
+function ExtBlock({
+  title, desc, enabled, onToggle, children,
+}: {
+  title: string; desc: string; enabled: boolean;
+  onToggle: (v: boolean) => void; children: React.ReactNode;
+}) {
+  return (
+    <div className={
+      "rounded-xl border p-4 transition " +
+      (enabled
+        ? "border-navy-700 bg-navy-50/40 ring-2 ring-navy-700/10"
+        : "border-slate-200 bg-white")
+    }>
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <span className={
+              "inline-block w-2 h-2 rounded-full " +
+              (enabled ? "bg-emerald-500" : "bg-slate-300")
+            } />
+            <h4 className="font-semibold text-navy-950">{title}</h4>
+            <span className={
+              "text-[10px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded " +
+              (enabled
+                ? "bg-emerald-50 text-emerald-700"
+                : "bg-slate-100 text-slate-500")
+            }>
+              {enabled ? "ON" : "OFF"}
+            </span>
+          </div>
+          <p className="text-xs text-slate-500 mt-1 leading-snug">{desc}</p>
+        </div>
+        <Switch v={enabled} onChange={onToggle} />
+      </div>
+      {enabled && <div className="mt-4">{children}</div>}
+    </div>
+  );
+}
+
+function Switch({ v, onChange }: { v: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={v}
+      onClick={() => onChange(!v)}
+      className={
+        "relative inline-flex h-6 w-11 items-center rounded-full transition " +
+        (v ? "bg-navy-700" : "bg-slate-300")
+      }
+    >
+      <span className={
+        "inline-block h-5 w-5 transform rounded-full bg-white shadow transition " +
+        (v ? "translate-x-5" : "translate-x-0.5")
+      } />
+    </button>
   );
 }

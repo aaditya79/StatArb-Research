@@ -2,26 +2,30 @@ import ConfigPanel from "../components/ConfigPanel";
 import KPICards from "../components/KPICard";
 import {
   EquityChart, DrawdownChart, ExposureChart,
-  AnnualReturnsChart, SScoreChart,
+  AnnualReturnsChart, SScoreChart, RegimeChart,
 } from "../components/Charts";
 import SScoreTable from "../components/SScoreTable";
 import type { BacktestRequest, BacktestResponse, DefaultsResponse } from "../types";
+import type { ProgressEvent } from "../api";
 
 interface Props {
   defaults: DefaultsResponse;
   result: BacktestResponse | null;
   busy: boolean;
+  progress: ProgressEvent | null;
   error: string | null;
   onRun: (req: BacktestRequest) => void;
 }
 
-export default function BacktestPage({ defaults, result, busy, error, onRun }: Props) {
+export default function BacktestPage({
+  defaults, result, busy, progress, error, onRun,
+}: Props) {
   return (
     <div className="space-y-6">
       <ConfigPanel defaults={defaults} onRun={onRun} busy={busy} />
       {error && <ErrorBanner msg={error} />}
       {!result && !busy && !error && <Placeholder />}
-      {busy && <RunningCard />}
+      {busy && <RunningCard progress={progress} />}
       {result && <Results r={result} />}
     </div>
   );
@@ -39,6 +43,12 @@ function Results({ r }: { r: BacktestResponse }) {
       <Card title="Equity curve" subtitle="Mark-to-market portfolio value">
         <EquityChart data={r.equity_curve} />
       </Card>
+      {r.regime_curve && r.regime_curve.length > 0 && (
+        <Card title="HMM regime probability"
+          subtitle="P(favorable | data up to t) — entries gated when below threshold">
+          <RegimeChart data={r.regime_curve} />
+        </Card>
+      )}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card title="Drawdown" subtitle="Underwater curve from running peak">
           <DrawdownChart data={r.drawdown_curve} />
@@ -140,12 +150,44 @@ function Placeholder() {
   );
 }
 
-function RunningCard() {
+const STAGE_LABELS: Record<string, string> = {
+  starting: "Sending request",
+  config: "Building configuration",
+  fetch_data: "Fetching market data",
+  universe: "Filtering universe",
+  sector_map: "Resolving sector mapping",
+  build_factor_model: "Building factor model",
+  fetch_factors: "Fetching factor references",
+  fit_factor_model: "Fitting factor model",
+  run_backtest: "Running backtest engine",
+  metrics: "Computing metrics",
+  done: "Done",
+};
+
+function RunningCard({ progress }: { progress: ProgressEvent | null }) {
+  const pct = progress ? Math.max(0, Math.min(1, progress.progress)) : 0;
+  const stageLabel = progress
+    ? STAGE_LABELS[progress.stage] ?? progress.stage
+    : "Starting";
+  const message = progress?.message ?? "Preparing run…";
   return (
-    <div className="card py-16 grid place-items-center text-center">
-      <div>
-        <div className="mx-auto mb-3 w-10 h-10 rounded-full border-2 border-navy-700/20 border-t-navy-700 animate-spin" />
-        <p className="text-sm font-semibold text-navy-950">Running backtest…</p>
+    <div className="card py-12 px-8 grid place-items-center text-center">
+      <div className="w-full max-w-md">
+        <div className="mx-auto mb-4 w-10 h-10 rounded-full border-2 border-navy-700/20 border-t-navy-700 animate-spin" />
+        <p className="text-sm font-semibold text-navy-950">{stageLabel}</p>
+        <p className="text-xs text-slate-500 mt-1">{message}</p>
+        <div className="mt-4">
+          <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-navy-500 to-navy-700 transition-all duration-300 ease-out"
+              style={{ width: `${pct * 100}%` }}
+            />
+          </div>
+          <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500 font-mono">
+            <span>{progress?.stage ?? "starting"}</span>
+            <span>{(pct * 100).toFixed(0)}%</span>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -37,6 +37,19 @@ export interface BacktestRequest {
   pairs_max: number;
   pairs_min_hl: number;
   pairs_max_hl: number;
+
+  hmm_enabled: boolean;
+  hmm_n_states: number;
+  hmm_training_window: number;
+  hmm_feature_window: number;
+  hmm_entry_threshold: number;
+  hmm_favorable_high_vol: boolean;
+  hmm_soft_gate: boolean;
+  hmm_soft_gate_floor: number;
+
+  vol_target_enabled: boolean;
+  vol_target_floor: number;
+  vol_target_cap: number;
 }
 
 export interface Metrics {
@@ -94,6 +107,7 @@ export interface BacktestResponse {
   trades: Trade[];
   diagnostics: FactorDiagnostics;
   ou_last: OURow[];
+  regime_curve: { date: string; p_favorable: number }[];
 }
 
 export interface CointPair {

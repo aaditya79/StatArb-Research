@@ -111,6 +111,28 @@ export function AnnualReturnsChart({ data }: { data: { year: number; return: num
   );
 }
 
+export function RegimeChart({ data }: { data: { date: string; p_favorable: number }[] }) {
+  return (
+    <ResponsiveContainer width="100%" height={220}>
+      <AreaChart data={data} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+        <defs>
+          <linearGradient id="regime" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={ACCENT_LIGHT} stopOpacity={0.45} />
+            <stop offset="100%" stopColor={ACCENT_LIGHT} stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid stroke={GRID} vertical={false} />
+        <XAxis dataKey="date" {...AXIS} minTickGap={40} />
+        <YAxis {...AXIS} domain={[0, 1]} tickFormatter={(v) => `${(v * 100).toFixed(0)}%`} />
+        <Tooltip content={<TooltipBox fmt={(v: number) => `${(v * 100).toFixed(1)}%`} />} />
+        <ReferenceLine y={0.5} stroke="#94a3b8" strokeDasharray="4 4" />
+        <Area type="monotone" dataKey="p_favorable" name="P(favorable)"
+          stroke={ACCENT} strokeWidth={2} fill="url(#regime)" />
+      </AreaChart>
+    </ResponsiveContainer>
+  );
+}
+
 export function SScoreChart({ data }: { data: { ticker: string; sscore: number }[] }) {
   return (
     <ResponsiveContainer width="100%" height={Math.max(240, data.length * 20)}>

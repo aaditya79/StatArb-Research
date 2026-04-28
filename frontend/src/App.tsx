@@ -4,7 +4,7 @@ import TradesPage from "./pages/Trades";
 import DiagnosticsPage from "./pages/Diagnostics";
 import CointegrationPage from "./pages/Cointegration";
 import GridSearchPage from "./pages/GridSearch";
-import { fetchDefaults, runBacktest } from "./api";
+import { fetchDefaults, runBacktestStream, type ProgressEvent } from "./api";
 import type { BacktestRequest, BacktestResponse, DefaultsResponse } from "./types";
 
 type Page = "backtest" | "trades" | "diagnostics" | "cointegration" | "grid";
@@ -22,6 +22,7 @@ export default function App() {
   const [result, setResult] = useState<BacktestResponse | null>(null);
   const [lastReq, setLastReq] = useState<BacktestRequest | null>(null);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<ProgressEvent | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState<Page>("backtest");
 
@@ -35,12 +36,15 @@ export default function App() {
     setBusy(true);
     setError(null);
     setLastReq(req);
+    setProgress({ stage: "starting", message: "Sending request…", progress: 0 });
     try {
-      setResult(await runBacktest(req));
+      const r = await runBacktestStream(req, setProgress);
+      setResult(r);
     } catch (e: any) {
       setError(e.message ?? String(e));
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   }
 
@@ -57,6 +61,7 @@ export default function App() {
                 defaults={defaults}
                 result={result}
                 busy={busy}
+                progress={progress}
                 error={error}
                 onRun={onRun}
               />
